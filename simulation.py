@@ -5,13 +5,14 @@ Orchestrates the full auction simulation across N rounds.
 
 Participants:
   - One AIBidder (Q-learning)
+  - One BanditBidder (UCB or Thompson Sampling) — optional
   - Three fixed-strategy bidders: truthful, shaded, random
 
 Each round:
   1. Draw private valuations from Uniform(10, 100)
   2. Each bidder produces a bid via their strategy
   3. Auction engine determines winner and price paid
-  4. AI bidder receives reward signal and updates Q-table
+  4. Learning agents receive reward signal and update their models
   5. Metrics are collected into a row
 
 Returns a Pandas DataFrame — one row per round.
@@ -23,6 +24,7 @@ import pandas as pd
 from auction_engine import first_price_auction, second_price_auction
 from strategies import truthful_strategy, shaded_strategy, random_strategy
 from ai_bidder import AIBidder
+from bandit_bidder import BanditBidder
 
 
 # ---------------------------------------------------------------------------
@@ -52,42 +54,34 @@ def run_simulation(
     ai_epsilon: float = 1.0,               # initial exploration rate
     ai_epsilon_decay: float = 0.995,       # epsilon decay per round
     ai_epsilon_min: float = 0.05,          # minimum exploration floor
+    include_bandit: bool = False,          # whether to include BanditBidder
+    bandit_algorithm: str = "ucb",         # "ucb" | "thompson"
+    bandit_ucb_c: float = 2.0,             # UCB exploration coefficient
     seed: int | None = None,               # optional RNG seed for reproducibility
 ) -> pd.DataFrame:
     """
     Run an auction simulation and return per-round metrics as a DataFrame.
 
     Args:
-        n_rounds        (int):   Number of auction rounds.
-        auction_type    (str):   "first" for first-price, "second" for second-price.
-        shade_factor    (float): Bid fraction used by the shaded strategy.
-        val_low         (float): Lower bound for Uniform valuation draws.
-        val_high        (float): Upper bound for Uniform valuation draws.
-        ai_n_levels     (int):   Number of discrete bid fractions for the AI bidder.
-        ai_alpha        (float): AI Q-learning rate.
-        ai_gamma        (float): AI discount factor.
-        ai_epsilon      (float): AI initial epsilon.
-        ai_epsilon_decay(float): AI epsilon decay rate.
-        ai_epsilon_min  (float): AI epsilon minimum.
-        seed            (int|None): Random seed for reproducibility.
+        n_rounds         (int):   Number of auction rounds.
+        auction_type     (str):   "first" for first-price, "second" for second-price.
+        shade_factor     (float): Bid fraction used by the shaded strategy.
+        val_low          (float): Lower bound for Uniform valuation draws.
+        val_high         (float): Upper bound for Uniform valuation draws.
+        ai_n_levels      (int):   Number of discrete bid fractions for the AI bidder.
+        ai_alpha         (float): AI Q-learning rate.
+        ai_gamma         (float): AI discount factor.
+        ai_epsilon       (float): AI initial epsilon.
+        ai_epsilon_decay (float): AI epsilon decay rate.
+        ai_epsilon_min   (float): AI epsilon minimum.
+        include_bandit   (bool):  If True, adds a BanditBidder to the simulation.
+        bandit_algorithm (str):   "ucb" or "thompson" — bandit strategy to use.
+        bandit_ucb_c     (float): Exploration coefficient for UCB algorithm.
+        seed             (int|None): Random seed for reproducibility.
 
     Returns:
-        pd.DataFrame: One row per round with the following columns:
-            round           - Round index (1-indexed)
-            auction_type    - "first" or "second"
-            winner_id       - ID of the winning bidder
-            price_paid      - Price the winner paid
-            winner_value    - Winner's true private valuation
-            highest_value   - Highest valuation among all bidders
-            efficiency      - winner_value / highest_value  (allocative efficiency)
-            ai_bid          - The AI bidder's bid this round
-            ai_valuation    - The AI bidder's private valuation this round
-            ai_bid_ratio    - ai_bid / ai_valuation
-            ai_reward       - Reward received by the AI bidder this round
-            ai_epsilon      - Epsilon at time of bidding (exploration rate)
-            ai_best_fraction- AI's current best Q-table fraction (post-update)
-            <bidder>_bid    - Bid placed by each individual bidder
-            <bidder>_value  - Valuation drawn by each individual bidder
+        pd.DataFrame: One row per round. Bandit columns are present only when
+                      include_bandit=True; all other columns are always present.
     """
     # ------------------------------------------------------------------
     # Validation
@@ -118,6 +112,14 @@ def run_simulation(
         epsilon_min=ai_epsilon_min,
     )
 
+    # Instantiate BanditBidder if requested (same n_levels for fair comparison)
+    bandit = BanditBidder(
+        bidder_id="bandit_bidder",
+        n_levels=ai_n_levels,
+        algorithm=bandit_algorithm,
+        ucb_c=bandit_ucb_c,
+    ) if include_bandit else None
+
     # Select auction engine
     auction_fn = first_price_auction if auction_type == "first" else second_price_auction
 
@@ -134,6 +136,8 @@ def run_simulation(
             for bidder_id in FIXED_BIDDERS
         }
         valuations["ai_bidder"] = random.uniform(val_low, val_high)
+        if bandit is not None:
+            valuations["bandit_bidder"] = random.uniform(val_low, val_high)
 
         # 2. Collect bids
         bids = {}
@@ -149,16 +153,31 @@ def run_simulation(
         ai_bid = ai.get_bid(ai_val)
         bids["ai_bidder"] = ai_bid
 
+        # Collect bandit bid if active
+        if bandit is not None:
+            bandit_val = valuations["bandit_bidder"]
+            bandit_bid = bandit.get_bid(bandit_val)
+            bids["bandit_bidder"] = bandit_bid
+
         # 3. Run auction
         winner_id, price_paid = auction_fn(bids)
 
-        # 4. Update AI bidder
+        # 4. Update AI bidder (Q-learning)
         ai_won = (winner_id == "ai_bidder")
         ai_reward = ai.update(
             valuation=ai_val,
             won=ai_won,
             price_paid=price_paid if ai_won else 0.0,
         )
+
+        # Update Bandit bidder if active
+        if bandit is not None:
+            bandit_won = (winner_id == "bandit_bidder")
+            bandit_reward = bandit.update(
+                valuation=valuations["bandit_bidder"],
+                won=bandit_won,
+                price_paid=price_paid if bandit_won else 0.0,
+            )
 
         # 5. Compute metrics
         winner_value   = valuations[winner_id]
@@ -183,8 +202,22 @@ def run_simulation(
             "ai_best_fraction": round(ai.best_fraction, 4),
         }
 
-        # Per-bidder bid and valuation columns
-        for bidder_id in list(FIXED_BIDDERS.keys()) + ["ai_bidder"]:
+        # Bandit metrics — only present when include_bandit=True
+        if bandit is not None:
+            bandit_val   = valuations["bandit_bidder"]
+            bandit_bid   = bids["bandit_bidder"]
+            row["bandit_bid"]           = round(bandit_bid, 4)
+            row["bandit_valuation"]     = round(bandit_val, 4)
+            row["bandit_bid_ratio"]     = round(bandit_bid / bandit_val if bandit_val > 0 else 0.0, 4)
+            row["bandit_reward"]        = round(bandit_reward, 4)
+            row["bandit_best_fraction"] = round(bandit.best_fraction, 4)
+
+        # Per-bidder bid and valuation columns (all active bidders)
+        active_bidders = list(FIXED_BIDDERS.keys()) + ["ai_bidder"]
+        if bandit is not None:
+            active_bidders.append("bandit_bidder")
+
+        for bidder_id in active_bidders:
             row[f"{bidder_id}_bid"]   = round(bids[bidder_id], 4)
             row[f"{bidder_id}_value"] = round(valuations[bidder_id], 4)
 
