@@ -213,10 +213,11 @@ html, body, [data-testid="stAppViewContainer"] {
 # PLOTLY THEME HELPER
 # ─────────────────────────────────────────────────────────────────────────────
 COLORS = {
-    "ai_bidder": "#7b61ff",
-    "truthful":  "#00e5c0",
-    "shaded":    "#ffd166",
-    "random":    "#ff6b6b",
+    "ai_bidder":     "#7b61ff",
+    "truthful":      "#00e5c0",
+    "shaded":        "#ffd166",
+    "random":        "#ff6b6b",
+    "bandit_bidder": "#ff9f43",   # warm orange — distinct from all existing colours
 }
 BG      = "#12121a"
 GRID    = "#2a2a3d"
@@ -267,6 +268,20 @@ with st.sidebar:
     ai_epsilon_decay = st.slider("Epsilon Decay",       0.98, 1.0,  0.995, 0.001, format="%.3f")
     ai_n_levels      = st.slider("Bid Levels",          5,    21,   11,   2)
 
+    st.markdown('<p class="sidebar-section">Bandit AI (UCB / Thompson)</p>', unsafe_allow_html=True)
+    include_bandit   = st.checkbox("Include Bandit AI", value=False)
+    bandit_algorithm = st.selectbox(
+        "Bandit Algorithm",
+        options=["ucb", "thompson"],
+        format_func=lambda x: "UCB (Upper Confidence Bound)" if x == "ucb" else "Thompson Sampling",
+        disabled=not include_bandit,
+    )
+    bandit_ucb_c = st.slider(
+        "UCB Exploration (c)", 0.5, 5.0, 2.0, 0.5,
+        help="Higher = more exploration. Only used when UCB is selected.",
+        disabled=(not include_bandit or bandit_algorithm != "ucb"),
+    )
+
     st.markdown('<p class="sidebar-section">Reproducibility</p>', unsafe_allow_html=True)
     use_seed = st.checkbox("Fix Random Seed", value=False)
     seed_val = st.number_input("Seed", value=42, step=1, disabled=not use_seed)
@@ -280,7 +295,7 @@ with st.sidebar:
 st.markdown("""
 <div class="hero">
   <h1>AI Auction Simulator</h1>
-  <p>Reinforcement-learning bidder vs fixed strategies · First &amp; Second-price auctions · Real-time analytics</p>
+  <p>Q-Learning &amp; Bandit AI bidders vs fixed strategies · First &amp; Second-price auctions · Real-time analytics</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -300,6 +315,9 @@ if run_btn:
             ai_gamma=ai_gamma,
             ai_epsilon_decay=ai_epsilon_decay,
             ai_n_levels=ai_n_levels,
+            include_bandit=include_bandit,
+            bandit_algorithm=bandit_algorithm,
+            bandit_ucb_c=bandit_ucb_c,
             seed=int(seed_val) if use_seed else None,
         )
     st.session_state.df = df
@@ -325,21 +343,39 @@ ai_win_rate    = (df["winner_id"] == "ai_bidder").mean()
 ai_total_reward= df["ai_reward"].sum()
 avg_ai_ratio   = df["ai_bid_ratio"].mean()
 
-# win-rate breakdown
 win_counts = df["winner_id"].value_counts()
+
+# Bidder order — bandit appended only when it was active this run
 bidder_order = ["ai_bidder", "truthful", "shaded", "random"]
+if include_bandit and "bandit_reward" in df.columns:
+    bidder_order.append("bandit_bidder")
 
 st.markdown('<div class="section-header">Summary Metrics</div>', unsafe_allow_html=True)
 
-c1, c2, c3, c4, c5, c6 = st.columns(6)
-cards = [
-    (c1, "Total Rounds",      f"{total_rounds:,}",           None),
-    (c2, "Avg Revenue",       f"{avg_revenue:.2f}",          None),
-    (c3, "Avg Efficiency",    f"{avg_efficiency:.1%}",       "delta-pos" if avg_efficiency > 0.85 else "delta-neg"),
-    (c4, "AI Win Rate",       f"{ai_win_rate:.1%}",          "delta-pos" if ai_win_rate > 0.25 else "delta-neg"),
-    (c5, "AI Total Profit",   f"{ai_total_reward:.1f}",      "delta-pos" if ai_total_reward > 0 else "delta-neg"),
-    (c6, "AI Avg Bid Ratio",  f"{avg_ai_ratio:.2f}×",        None),
-]
+if include_bandit and "bandit_reward" in df.columns:
+    bandit_win_rate     = (df["winner_id"] == "bandit_bidder").mean()
+    bandit_total_reward = df["bandit_reward"].sum()
+    c1, c2, c3, c4, c5, c6, c7, c8 = st.columns(8)
+    cards = [
+        (c1, "Total Rounds",        f"{total_rounds:,}",          None),
+        (c2, "Avg Revenue",         f"{avg_revenue:.2f}",         None),
+        (c3, "Avg Efficiency",      f"{avg_efficiency:.1%}",      "delta-pos" if avg_efficiency > 0.85 else "delta-neg"),
+        (c4, "AI Win Rate",         f"{ai_win_rate:.1%}",         "delta-pos" if ai_win_rate > 0.20 else "delta-neg"),
+        (c5, "AI Total Profit",     f"{ai_total_reward:.1f}",     "delta-pos" if ai_total_reward > 0 else "delta-neg"),
+        (c6, "AI Avg Bid Ratio",    f"{avg_ai_ratio:.2f}×",       None),
+        (c7, "Bandit Win Rate",     f"{bandit_win_rate:.1%}",     "delta-pos" if bandit_win_rate > 0.20 else "delta-neg"),
+        (c8, "Bandit Total Profit", f"{bandit_total_reward:.1f}", "delta-pos" if bandit_total_reward > 0 else "delta-neg"),
+    ]
+else:
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    cards = [
+        (c1, "Total Rounds",      f"{total_rounds:,}",          None),
+        (c2, "Avg Revenue",       f"{avg_revenue:.2f}",         None),
+        (c3, "Avg Efficiency",    f"{avg_efficiency:.1%}",      "delta-pos" if avg_efficiency > 0.85 else "delta-neg"),
+        (c4, "AI Win Rate",       f"{ai_win_rate:.1%}",         "delta-pos" if ai_win_rate > 0.25 else "delta-neg"),
+        (c5, "AI Total Profit",   f"{ai_total_reward:.1f}",     "delta-pos" if ai_total_reward > 0 else "delta-neg"),
+        (c6, "AI Avg Bid Ratio",  f"{avg_ai_ratio:.2f}×",       None),
+    ]
 for col, label, val, cls in cards:
     hint = ""
     if cls:
@@ -379,6 +415,9 @@ for bidder in bidder_order:
 
 labels      = ["AI Bidder", "Truthful", "Shaded", "Random"]
 colors_list = ["#7b61ff", "#00e5c0", "#ffd166", "#ff6b6b"]
+if include_bandit and "bandit_bidder" in bidder_order:
+    labels.append("Bandit AI")
+    colors_list.append("#ff9f43")
 
 fig = go.Figure()
 fig.add_trace(go.Bar(
@@ -415,9 +454,10 @@ st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 st.markdown('</div>', unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GRAPH 2 — AI Learning Curve
+# GRAPH 2 — Learning Curves (Q-learner + Bandit when active)
 # ─────────────────────────────────────────────────────────────────────────────
-st.markdown('<div class="section-header">② AI Learning Curve</div>', unsafe_allow_html=True)
+learning_header = "② AI Learning Curve — Q-Learner vs Bandit" if (include_bandit and "bandit_reward" in df.columns) else "② AI Learning Curve"
+st.markdown(f'<div class="section-header">{learning_header}</div>', unsafe_allow_html=True)
 
 col_l, col_r = st.columns(2)
 
@@ -427,59 +467,58 @@ with col_l:
     df["ai_cumulative_reward"] = df["ai_reward"].cumsum()
 
     fig = go.Figure()
+    # Q-learner raw + rolling reward
     fig.add_trace(go.Scatter(
         x=df["round"], y=df["ai_reward"],
-        mode="lines", name="Per-Round Reward",
+        mode="lines", name="Q-Learner (raw)",
         line=dict(color="#7b61ff", width=1),
         opacity=0.25,
     ))
     fig.add_trace(go.Scatter(
         x=df["round"], y=df["ai_reward_ma"],
-        mode="lines", name=f"Rolling Mean ({window}r)",
-        line=dict(color="#00e5c0", width=2.5),
+        mode="lines", name=f"Q-Learner rolling ({window}r)",
+        line=dict(color="#7b61ff", width=2.5),
     ))
-    fig.add_trace(go.Scatter(
-        x=df["round"], y=df["ai_cumulative_reward"],
-        mode="lines", name="Cumulative Profit",
-        line=dict(color="#ffd166", width=2, dash="dot"),
-        yaxis="y2",
-    ))
-    fig.update_layout(
-        **base_layout("AI Reward Over Time (with Cumulative Profit)", height=360),
-        yaxis2=dict(
-            overlaying="y", side="right",
-            gridcolor=GRID, zerolinecolor=GRID,
-            tickfont=dict(size=10, color=MUTED),
-            title=dict(text="Cumulative Profit", font=dict(size=10, color=MUTED)),
-        ),
-    )
+    # Bandit raw + rolling reward — shown only when active
+    if include_bandit and "bandit_reward" in df.columns:
+        df["bandit_reward_ma"] = df["bandit_reward"].rolling(window).mean()
+        fig.add_trace(go.Scatter(
+            x=df["round"], y=df["bandit_reward"],
+            mode="lines", name="Bandit (raw)",
+            line=dict(color="#ff9f43", width=1),
+            opacity=0.25,
+        ))
+        fig.add_trace(go.Scatter(
+            x=df["round"], y=df["bandit_reward_ma"],
+            mode="lines", name=f"Bandit rolling ({window}r)",
+            line=dict(color="#ff9f43", width=2.5),
+        ))
+    fig.update_layout(**base_layout("Per-Round Reward: Q-Learner vs Bandit", height=360))
     st.markdown('<div class="chart-wrap">', unsafe_allow_html=True)
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
     st.markdown('</div>', unsafe_allow_html=True)
 
 with col_r:
+    # Cumulative profit comparison
+    df["ai_cumulative_reward"] = df["ai_reward"].cumsum()
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=df["round"], y=df["ai_epsilon"],
-        mode="lines", name="Epsilon (Exploration)",
-        line=dict(color="#ffd166", width=2.5),
-        fill="tozeroy", fillcolor="rgba(255,209,102,0.07)",
+        x=df["round"], y=df["ai_cumulative_reward"],
+        mode="lines", name="Q-Learner cumulative",
+        line=dict(color="#7b61ff", width=2.5),
+        fill="tozeroy", fillcolor="rgba(123,97,255,0.07)",
     ))
-    fig.add_trace(go.Scatter(
-        x=df["round"], y=df["ai_best_fraction"],
-        mode="lines", name="Best Bid Fraction",
-        line=dict(color="#ff6b6b", width=2, dash="dot"),
-        yaxis="y2",
-    ))
-    fig.update_layout(
-        **base_layout("Exploration Decay & Converging Bid Fraction", height=360),
-        yaxis2=dict(
-            overlaying="y", side="right",
-            gridcolor=GRID, zerolinecolor=GRID,
-            tickfont=dict(size=10, color=MUTED),
-            title=dict(text="Bid Fraction", font=dict(size=10, color=MUTED)),
-        ),
-    )
+    if include_bandit and "bandit_reward" in df.columns:
+        df["bandit_cumulative_reward"] = df["bandit_reward"].cumsum()
+        fig.add_trace(go.Scatter(
+            x=df["round"], y=df["bandit_cumulative_reward"],
+            mode="lines", name="Bandit cumulative",
+            line=dict(color="#ff9f43", width=2.5),
+            fill="tozeroy", fillcolor="rgba(255,159,67,0.07)",
+        ))
+    algo_label = bandit_algorithm.upper() if include_bandit else ""
+    title = f"Cumulative Profit: Q-Learner vs {algo_label} Bandit" if include_bandit else "Q-Learner Cumulative Profit"
+    fig.update_layout(**base_layout(title, height=360))
     st.markdown('<div class="chart-wrap">', unsafe_allow_html=True)
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
     st.markdown('</div>', unsafe_allow_html=True)
@@ -572,10 +611,10 @@ with col_l:
     st.markdown('</div>', unsafe_allow_html=True)
 
 with col_r:
-    # Efficiency breakdown by winner
+    # Efficiency breakdown by winner — dynamically includes bandit when active
     eff_by_winner = df.groupby("winner_id")["efficiency"].mean().reindex(bidder_order).fillna(0)
     fig = go.Figure(go.Bar(
-        x=["AI Bidder", "Truthful", "Shaded", "Random"],
+        x=labels,
         y=eff_by_winner.values,
         marker_color=colors_list,
         marker_line=dict(color=BG, width=2),
@@ -602,21 +641,44 @@ with st.expander("Show full simulation data", expanded=False):
         "winner_value", "highest_value", "efficiency",
         "ai_bid", "ai_valuation", "ai_bid_ratio", "ai_reward", "ai_epsilon",
     ]
-    st.dataframe(
-        df[display_cols].style.format({
-            "price_paid":    "{:.2f}",
-            "winner_value":  "{:.2f}",
-            "highest_value": "{:.2f}",
-            "efficiency":    "{:.1%}",
-            "ai_bid":        "{:.2f}",
-            "ai_valuation":  "{:.2f}",
-            "ai_bid_ratio":  "{:.2f}",
-            "ai_reward":     "{:.2f}",
-            "ai_epsilon":    "{:.3f}",
-        }).background_gradient(subset=["ai_reward"], cmap="Purples"),
-        use_container_width=True,
-        height=460,
-    )
+    fmt = {
+        "price_paid":    "{:.2f}",
+        "winner_value":  "{:.2f}",
+        "highest_value": "{:.2f}",
+        "efficiency":    "{:.1%}",
+        "ai_bid":        "{:.2f}",
+        "ai_valuation":  "{:.2f}",
+        "ai_bid_ratio":  "{:.2f}",
+        "ai_reward":     "{:.2f}",
+        "ai_epsilon":    "{:.3f}",
+    }
+    # Append bandit columns if present
+    if include_bandit and "bandit_reward" in df.columns:
+        display_cols += ["bandit_bid", "bandit_valuation", "bandit_bid_ratio", "bandit_reward"]
+        fmt.update({
+            "bandit_bid":       "{:.2f}",
+            "bandit_valuation": "{:.2f}",
+            "bandit_bid_ratio": "{:.2f}",
+            "bandit_reward":    "{:.2f}",
+        })
+    # Only keep cols that actually exist in df (guard against stale session state)
+    display_cols = [c for c in display_cols if c in df.columns]
+
+    display_df = df[display_cols]
+    total_cells = display_df.shape[0] * display_df.shape[1]
+
+    # Pandas Styler has a cell-count limit — raise it dynamically or skip styling
+    # for large runs to avoid StreamlitAPIException
+    try:
+        pd.set_option("styler.render.max_elements", max(total_cells, 262144))
+        styled = display_df.style.format(fmt).background_gradient(
+            subset=["ai_reward"], cmap="Purples"
+        )
+        st.dataframe(styled, use_container_width=True, height=460)
+    except Exception:
+        # Fallback: plain dataframe with no styling (always works at any size)
+        st.dataframe(display_df, use_container_width=True, height=460)
+
     csv = df.to_csv(index=False).encode("utf-8")
     st.download_button(
         label="⬇  Download Full CSV",
