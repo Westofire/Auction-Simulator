@@ -4,8 +4,9 @@ simulation.py
 Orchestrates the full auction simulation across N rounds.
 
 Participants:
-  - One AIBidder (Q-learning)
-  - One BanditBidder (UCB or Thompson Sampling) — optional
+  - One AIBidder     (Q-learning)                    — always active
+  - One BanditBidder (UCB or Thompson Sampling)      — optional
+  - One DQNBidder    (Deep Q-Network via PyTorch)    — optional
   - Three fixed-strategy bidders: truthful, shaded, random
 
 Each round:
@@ -25,6 +26,7 @@ from auction_engine import first_price_auction, second_price_auction
 from strategies import truthful_strategy, shaded_strategy, random_strategy
 from ai_bidder import AIBidder
 from bandit_bidder import BanditBidder
+from dqn_bidder import DQNBidder
 
 
 # ---------------------------------------------------------------------------
@@ -38,9 +40,60 @@ FIXED_BIDDERS = {
 }
 
 
+
 # ---------------------------------------------------------------------------
-# Core simulation function
+# Regret helper
 # ---------------------------------------------------------------------------
+
+def compute_optimal_profit(
+    valuation: float,
+    auction_type: str,
+    shade_factor: float,
+    all_bids: dict,
+    agent_id: str,
+) -> float:
+    """
+    Compute the profit the agent would have earned using the optimal strategy
+    for this auction type, given the same valuation and the same competitors.
+
+    Second-Price optimal = truthful bidding (bid = valuation).
+    First-Price  optimal = bid shading     (bid = valuation * shade_factor).
+
+    We replace only this agent's bid with the optimal bid, re-run the auction
+    logic on the same competitor bids, and return the resulting profit.
+
+    Args:
+        valuation    (float): Agent's private value this round.
+        auction_type (str):   "first" or "second".
+        shade_factor (float): Shade fraction (used only for first-price).
+        all_bids     (dict):  Full bid dict from this round (all bidders).
+        agent_id     (str):   The agent whose optimal profit we are computing.
+
+    Returns:
+        float: Profit under optimal strategy (0 if optimal bid would lose).
+    """
+    # Compute the optimal bid for this agent
+    if auction_type == "second":
+        optimal_bid = valuation                      # truthful
+    else:
+        optimal_bid = valuation * shade_factor       # shaded
+
+    # Build a counterfactual bid dict — replace only this agent's bid
+    counterfactual_bids = {k: v for k, v in all_bids.items()}
+    counterfactual_bids[agent_id] = optimal_bid
+
+    # Re-run the same auction engine on counterfactual bids
+    if auction_type == "first":
+        from auction_engine import first_price_auction
+        winner_id, price_paid = first_price_auction(counterfactual_bids)
+    else:
+        from auction_engine import second_price_auction
+        winner_id, price_paid = second_price_auction(counterfactual_bids)
+
+    if winner_id == agent_id:
+        return valuation - price_paid
+    return 0.0
+
 
 def run_simulation(
     n_rounds: int = 200,
@@ -57,6 +110,11 @@ def run_simulation(
     include_bandit: bool = False,          # whether to include BanditBidder
     bandit_algorithm: str = "ucb",         # "ucb" | "thompson"
     bandit_ucb_c: float = 2.0,             # UCB exploration coefficient
+    include_dqn: bool = False,             # whether to include DQNBidder
+    dqn_epsilon_decay: float = 0.995,      # DQN epsilon decay per round
+    dqn_gamma: float = 0.95,               # DQN discount factor
+    dqn_lr: float = 1e-3,                  # DQN Adam learning rate
+    dqn_batch_size: int = 32,              # DQN replay mini-batch size
     seed: int | None = None,               # optional RNG seed for reproducibility
 ) -> pd.DataFrame:
     """
@@ -77,11 +135,16 @@ def run_simulation(
         include_bandit   (bool):  If True, adds a BanditBidder to the simulation.
         bandit_algorithm (str):   "ucb" or "thompson" — bandit strategy to use.
         bandit_ucb_c     (float): Exploration coefficient for UCB algorithm.
+        include_dqn      (bool):  If True, adds a DQNBidder to the simulation.
+        dqn_epsilon_decay(float): DQN epsilon decay rate per round.
+        dqn_gamma        (float): DQN discount factor.
+        dqn_lr           (float): DQN Adam learning rate.
+        dqn_batch_size   (int):   DQN replay buffer mini-batch size.
         seed             (int|None): Random seed for reproducibility.
 
     Returns:
-        pd.DataFrame: One row per round. Bandit columns are present only when
-                      include_bandit=True; all other columns are always present.
+        pd.DataFrame: One row per round. Bandit/DQN columns present only when
+                      the respective agent is enabled.
     """
     # ------------------------------------------------------------------
     # Validation
@@ -120,6 +183,17 @@ def run_simulation(
         ucb_c=bandit_ucb_c,
     ) if include_bandit else None
 
+    # Instantiate DQNBidder if requested
+    dqn = DQNBidder(
+        bidder_id="dqn_bidder",
+        n_levels=ai_n_levels,
+        val_high=val_high,
+        epsilon_decay=dqn_epsilon_decay,
+        gamma=dqn_gamma,
+        lr=dqn_lr,
+        batch_size=dqn_batch_size,
+    ) if include_dqn else None
+
     # Select auction engine
     auction_fn = first_price_auction if auction_type == "first" else second_price_auction
 
@@ -138,6 +212,8 @@ def run_simulation(
         valuations["ai_bidder"] = random.uniform(val_low, val_high)
         if bandit is not None:
             valuations["bandit_bidder"] = random.uniform(val_low, val_high)
+        if dqn is not None:
+            valuations["dqn_bidder"] = random.uniform(val_low, val_high)
 
         # 2. Collect bids
         bids = {}
@@ -159,6 +235,12 @@ def run_simulation(
             bandit_bid = bandit.get_bid(bandit_val)
             bids["bandit_bidder"] = bandit_bid
 
+        # Collect DQN bid if active
+        if dqn is not None:
+            dqn_val = valuations["dqn_bidder"]
+            dqn_bid = dqn.get_bid(dqn_val)
+            bids["dqn_bidder"] = dqn_bid
+
         # 3. Run auction
         winner_id, price_paid = auction_fn(bids)
 
@@ -177,6 +259,15 @@ def run_simulation(
                 valuation=valuations["bandit_bidder"],
                 won=bandit_won,
                 price_paid=price_paid if bandit_won else 0.0,
+            )
+
+        # Update DQN bidder if active
+        if dqn is not None:
+            dqn_won = (winner_id == "dqn_bidder")
+            dqn_reward = dqn.update(
+                valuation=valuations["dqn_bidder"],
+                won=dqn_won,
+                price_paid=price_paid if dqn_won else 0.0,
             )
 
         # 5. Compute metrics
@@ -212,14 +303,43 @@ def run_simulation(
             row["bandit_reward"]        = round(bandit_reward, 4)
             row["bandit_best_fraction"] = round(bandit.best_fraction, 4)
 
+        # DQN metrics — only present when include_dqn=True
+        if dqn is not None:
+            dqn_val = valuations["dqn_bidder"]
+            dqn_bid = bids["dqn_bidder"]
+            row["dqn_bid"]           = round(dqn_bid, 4)
+            row["dqn_valuation"]     = round(dqn_val, 4)
+            row["dqn_bid_ratio"]     = round(dqn_bid / dqn_val if dqn_val > 0 else 0.0, 4)
+            row["dqn_reward"]        = round(dqn_reward, 4)
+            row["dqn_epsilon"]       = round(dqn.epsilon, 4)
+            row["dqn_best_fraction"] = round(dqn.best_fraction, 4)
+            row["dqn_loss"]          = round(dqn.loss_history[-1] if dqn.loss_history else 0.0, 6)
+
         # Per-bidder bid and valuation columns (all active bidders)
         active_bidders = list(FIXED_BIDDERS.keys()) + ["ai_bidder"]
         if bandit is not None:
             active_bidders.append("bandit_bidder")
+        if dqn is not None:
+            active_bidders.append("dqn_bidder")
 
         for bidder_id in active_bidders:
             row[f"{bidder_id}_bid"]   = round(bids[bidder_id], 4)
             row[f"{bidder_id}_value"] = round(valuations[bidder_id], 4)
+
+        # 7. Regret calculation — regret = optimal_profit − actual_profit
+        #    Uses counterfactual bids: same competitors, optimal bid for agent
+        ai_optimal  = compute_optimal_profit(ai_val, auction_type, shade_factor, bids, "ai_bidder")
+        row["ai_regret"] = round(max(0.0, ai_optimal - ai_reward), 4)
+
+        if bandit is not None:
+            b_val = valuations["bandit_bidder"]
+            b_opt = compute_optimal_profit(b_val, auction_type, shade_factor, bids, "bandit_bidder")
+            row["bandit_regret"] = round(max(0.0, b_opt - bandit_reward), 4)
+
+        if dqn is not None:
+            d_val = valuations["dqn_bidder"]
+            d_opt = compute_optimal_profit(d_val, auction_type, shade_factor, bids, "dqn_bidder")
+            row["dqn_regret"] = round(max(0.0, d_opt - dqn_reward), 4)
 
         records.append(row)
 
